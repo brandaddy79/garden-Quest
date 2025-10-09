@@ -103,6 +103,34 @@
             50% { transform: scale(1.05); }
         }
 
+        /* Crop dust fog effect */
+        .crop-dust-fog {
+            position: absolute;
+            width: 80px;
+            height: 80px;
+            background: radial-gradient(circle, rgba(138, 43, 226, 0.8) 0%, rgba(138, 43, 226, 0.5) 40%, rgba(138, 43, 226, 0) 100%);
+            pointer-events: none;
+            z-index: 100;
+            animation: fog-dissipate 0.7s ease-out forwards;
+            border-radius: 50%;
+            filter: blur(8px);
+        }
+
+        @keyframes fog-dissipate {
+            0% {
+                opacity: 1;
+                transform: scale(0.6);
+            }
+            50% {
+                opacity: 0.9;
+                transform: scale(1.3);
+            }
+            100% {
+                opacity: 0;
+                transform: scale(1.8);
+            }
+        }
+
         .main-content {
             display: flex;
             flex-direction: column;
@@ -121,6 +149,15 @@
             width: fit-content;
             box-shadow: inset 0 2px 10px rgba(0,0,0,0.3), 0 4px 15px rgba(0,0,0,0.2);
             position: relative;
+        }
+
+        #game-board.crop-dust-mode {
+            cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><text x="0" y="24" font-size="24">✈️</text></svg>') 16 16, auto;
+        }
+
+        .tile.row-highlight {
+            background: rgba(138, 43, 226, 0.3) !important;
+            box-shadow: 0 0 15px rgba(138, 43, 226, 0.5) !important;
         }
 
         #game-board::before {
@@ -1655,6 +1692,32 @@
                     oscillator.start(now);
                     oscillator.stop(now + 0.35);
                     break;
+
+                case 'plane':
+                    // Airplane engine/propeller sound
+                    oscillator.type = 'sawtooth';
+                    oscillator.frequency.setValueAtTime(220, now);
+                    oscillator.frequency.setValueAtTime(240, now + 0.1);
+                    oscillator.frequency.setValueAtTime(220, now + 0.2);
+                    oscillator.frequency.setValueAtTime(240, now + 0.3);
+                    oscillator.frequency.setValueAtTime(220, now + 0.4);
+                    gainNode.gain.setValueAtTime(0.15, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.5);
+                    break;
+
+                case 'rockBreak':
+                    // Rock breaking/cracking sound
+                    oscillator.type = 'square';
+                    oscillator.frequency.setValueAtTime(120, now);
+                    oscillator.frequency.exponentialRampToValueAtTime(80, now + 0.15);
+                    oscillator.frequency.exponentialRampToValueAtTime(60, now + 0.3);
+                    gainNode.gain.setValueAtTime(0.25, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+                    oscillator.start(now);
+                    oscillator.stop(now + 0.35);
+                    break;
             }
         }
 
@@ -1679,6 +1742,8 @@
             const boardElement = document.getElementById('game-board');
             boardElement.innerHTML = '';
 
+            // Ensure board array is completely fresh
+            gameState.board = [];
             for (let row = 0; row < GRID_SIZE; row++) {
                 gameState.board[row] = [];
                 for (let col = 0; col < GRID_SIZE; col++) {
@@ -1687,6 +1752,8 @@
                     tile.dataset.row = row;
                     tile.dataset.col = col;
                     tile.addEventListener('click', () => handleTileClick(row, col));
+                    tile.addEventListener('mouseenter', () => handleTileHover(row, col));
+                    tile.addEventListener('mouseleave', clearTileHighlights);
                     boardElement.appendChild(tile);
                 }
             }
@@ -1699,13 +1766,13 @@
             while (!hasValidMove && attempts < 10) {
                 attempts++;
 
-                // Fill board with random tiles, ensuring no initial matches
+                // Fill board with random tiles (excluding weeds initially), ensuring no initial matches
                 for (let row = 0; row < GRID_SIZE; row++) {
                     for (let col = 0; col < GRID_SIZE; col++) {
                         let type;
                         do {
                             type = getRandomTileType();
-                        } while (wouldCreateMatch(row, col, type));
+                        } while (wouldCreateMatch(row, col, type) || type === 'weed');
                         gameState.board[row][col] = type;
                     }
                 }
@@ -1718,29 +1785,44 @@
                 }
             }
 
-            // Place 4 initial weeds
+            // Place 3 initial weeds AFTER board is filled
             placeInitialWeeds();
+
+            // Clear any weed previews that might have been set
+            gameState.weedPreviews.clear();
         }
 
         function placeInitialWeeds() {
+            // First, clear any existing weeds from random tile generation
+            for (let row = 0; row < GRID_SIZE; row++) {
+                for (let col = 0; col < GRID_SIZE; col++) {
+                    if (gameState.board[row][col] === 'weed') {
+                        gameState.board[row][col] = null;
+                    }
+                }
+            }
+
             const weedPositions = [];
             let attempts = 0;
-            const maxAttempts = 100;
+            const maxAttempts = 200;
 
-            while (weedPositions.length < 4 && attempts < maxAttempts) {
+            while (weedPositions.length < 3 && attempts < maxAttempts) {
                 attempts++;
                 const row = Math.floor(Math.random() * GRID_SIZE);
                 const col = Math.floor(Math.random() * GRID_SIZE);
 
-                // Check if position is valid
-                if (gameState.board[row][col] === 'rock') continue;
+                // Check if position is valid (not on a rock or existing weed)
+                if (gameState.board[row][col] === 'rock' || gameState.board[row][col] === 'weed') continue;
 
-                // Check if weed is at least 2 tiles apart from other weeds
+                // Check if weed is never adjacent (including diagonally) to other weeds
+                // Require at least 2 tiles distance in BOTH directions
                 let tooClose = false;
                 for (let weed of weedPositions) {
                     const rowDist = Math.abs(row - weed.row);
                     const colDist = Math.abs(col - weed.col);
-                    if (rowDist < 2 || colDist < 2) {
+                    // Both distances must be at least 2
+                    // This ensures no adjacent placement (orthogonal or diagonal)
+                    if (rowDist < 2 && colDist < 2) {
                         tooClose = true;
                         break;
                     }
@@ -1751,6 +1833,8 @@
                     gameState.board[row][col] = 'weed';
                 }
             }
+
+            console.log(`Placed ${weedPositions.length} weeds at:`, weedPositions);
         }
 
         function wouldCreateMatch(row, col, type) {
@@ -1840,18 +1924,34 @@
             document.querySelectorAll('.weed-vine').forEach(v => v.remove());
 
             const board = document.getElementById('game-board');
+            if (!board) return;
+
+            // Validate board state first
+            if (!gameState.board || !Array.isArray(gameState.board)) return;
 
             // Find all weed positions
             for (let row = 0; row < GRID_SIZE; row++) {
+                if (!gameState.board[row]) continue;
+
                 for (let col = 0; col < GRID_SIZE; col++) {
                     if (gameState.board[row][col] === 'weed') {
                         // Check right neighbor
-                        if (col < GRID_SIZE - 1 && gameState.board[row][col + 1] === 'weed') {
-                            createVine(row, col, row, col + 1);
+                        if (col < GRID_SIZE - 1) {
+                            const rightTile = gameState.board[row][col + 1];
+                            if (rightTile === 'weed') {
+                                createVine(row, col, row, col + 1);
+                            } else if (rightTile) {
+                                console.warn(`Vine NOT created: weed at [${row},${col}] has ${rightTile} at [${row},${col + 1}]`);
+                            }
                         }
                         // Check down neighbor
-                        if (row < GRID_SIZE - 1 && gameState.board[row + 1][col] === 'weed') {
-                            createVine(row, col, row + 1, col);
+                        if (row < GRID_SIZE - 1 && gameState.board[row + 1]) {
+                            const downTile = gameState.board[row + 1][col];
+                            if (downTile === 'weed') {
+                                createVine(row, col, row + 1, col);
+                            } else if (downTile) {
+                                console.warn(`Vine NOT created: weed at [${row},${col}] has ${downTile} at [${row + 1},${col}]`);
+                            }
                         }
                     }
                 }
@@ -1862,7 +1962,10 @@
             const tile1 = document.querySelector(`.tile[data-row="${row1}"][data-col="${col1}"]`);
             const tile2 = document.querySelector(`.tile[data-row="${row2}"][data-col="${col2}"]`);
 
-            if (!tile1 || !tile2) return;
+            if (!tile1 || !tile2) {
+                console.warn(`Cannot create vine: tile1(${row1},${col1})=${!!tile1}, tile2(${row2},${col2})=${!!tile2}`);
+                return;
+            }
 
             const rect1 = tile1.getBoundingClientRect();
             const rect2 = tile2.getBoundingClientRect();
@@ -1903,6 +2006,39 @@
         // ============================================
         // TILE INTERACTION
         // ============================================
+        function handleTileHover(row, col) {
+            // Only highlight if crop dust is active
+            if (gameState.activePowerUp !== 'cropDust') return;
+
+            clearTileHighlights();
+
+            // Show the spreading wave pattern
+            for (let c = 0; c < GRID_SIZE; c++) {
+                const distanceFromRight = GRID_SIZE - 1 - c;
+                const spread = Math.min(Math.floor(distanceFromRight / 4), 1);
+
+                for (let rowOffset = -spread; rowOffset <= spread; rowOffset++) {
+                    const targetRow = row + rowOffset;
+                    if (targetRow >= 0 && targetRow < GRID_SIZE) {
+                        const tile = document.querySelector(`.tile[data-row="${targetRow}"][data-col="${c}"]`);
+                        if (tile) {
+                            tile.style.border = '3px solid yellow';
+                            tile.style.opacity = '0.8';
+                        }
+                    }
+                }
+            }
+        }
+
+        function clearTileHighlights() {
+            document.querySelectorAll('.tile').forEach(tile => {
+                tile.classList.remove('row-highlight');
+                tile.classList.remove('col-highlight');
+                tile.style.border = '';
+                tile.style.opacity = '';
+            });
+        }
+
         function handleTileClick(row, col) {
             // Check if dev panel is open
             const devPanelOpen = document.getElementById('dev-panel').classList.contains('show');
@@ -1949,6 +2085,9 @@
         }
 
         async function attemptSwap(row1, col1, row2, col2) {
+            // Save state before swap for undo
+            saveStateSnapshot();
+
             gameState.isAnimating = true;
 
             // Perform swap
@@ -2013,12 +2152,13 @@
 
                 renderBoard();
 
-                // Check for valid moves - end game if none and no shuffle available
-                if (!hasValidMoves() && gameState.powerUps.shuffle === 0) {
-                    endGame();
-                }
-
                 gameState.isAnimating = false;
+
+                // Check for valid moves - end game if none and no shuffle available
+                // Do this after isAnimating is set to false so the check completes properly
+                if (!hasValidMoves() && gameState.powerUps.shuffle === 0) {
+                    endGame('No more valid moves!');
+                }
             }
         }
 
@@ -2067,6 +2207,10 @@
             }
 
             renderBoard();
+
+            // Check for and clear any matches created by shuffling
+            await sleep(300);
+            await processCascade();
         }
 
         // ============================================
@@ -2811,7 +2955,8 @@
                     cropDust: 1,
                     shuffle: 1
                 },
-                activePowerUp: null
+                activePowerUp: null,
+                soundEnabled: true
             };
 
             // Hide end panel
@@ -3217,8 +3362,46 @@
             selectedTile: null,
             savedLayouts: [null, null, null],
             weedHistory: [], // Track weed placements for undo
-            timerPaused: false
+            timerPaused: false,
+            actionHistory: [] // Full game state snapshots for undo
         };
+
+        // Save a snapshot of the current game state
+        function saveStateSnapshot() {
+            const snapshot = {
+                board: gameState.board.map(row => [...row]),
+                resources: { ...gameState.resources },
+                treasures: { ...gameState.treasures },
+                cleared: { ...gameState.cleared },
+                turns: gameState.turns,
+                moveCounter: gameState.moveCounter,
+                powerUps: { ...gameState.powerUps },
+                weedPreviews: new Set(gameState.weedPreviews)
+            };
+            devState.actionHistory.push(snapshot);
+            console.log(`Saved state snapshot (history length: ${devState.actionHistory.length})`);
+        }
+
+        // Restore the last saved snapshot
+        function restoreStateSnapshot() {
+            if (devState.actionHistory.length === 0) {
+                console.warn('No history to restore');
+                return false;
+            }
+
+            const snapshot = devState.actionHistory.pop();
+            gameState.board = snapshot.board.map(row => [...row]);
+            gameState.resources = { ...snapshot.resources };
+            gameState.treasures = { ...snapshot.treasures };
+            gameState.cleared = { ...snapshot.cleared };
+            gameState.turns = snapshot.turns;
+            gameState.moveCounter = snapshot.moveCounter;
+            gameState.powerUps = { ...snapshot.powerUps };
+            gameState.weedPreviews = new Set(snapshot.weedPreviews);
+
+            console.log(`Restored state snapshot (history length: ${devState.actionHistory.length})`);
+            return true;
+        }
 
         function toggleDevPanel() {
             const panel = document.getElementById('dev-panel');
@@ -3236,41 +3419,15 @@
         }
 
         function devReverseTurn() {
-            if (!gameState.isAnimating && gameState.moveCounter > 0) {
-                const previousMove = gameState.moveCounter;
-
-                // Find and undo the last weed action
-                const lastAction = devState.weedHistory[devState.weedHistory.length - 1];
-
-                if (lastAction && lastAction.moveCounter === previousMove) {
-                    // Restore the tiles that were replaced by weeds
-                    if (lastAction.action === 'finalize') {
-                        lastAction.weeds.forEach(weedData => {
-                            const [row, col] = weedData.key.split(',').map(Number);
-                            if (gameState.board[row][col] === 'weed') {
-                                // Restore the original tile (or null if it was empty)
-                                gameState.board[row][col] = weedData.previousTile;
-                            }
-                        });
-                    }
-
-                    // Remove from history
-                    devState.weedHistory.pop();
-                }
-
-                gameState.moveCounter--;
-
-                // Update the preview state based on new move counter
-                if (gameState.moveCounter % 2 === 1) {
-                    // Now on odd turn - show previews
-                    weedPreviewSpread();
+            if (!gameState.isAnimating) {
+                if (restoreStateSnapshot()) {
+                    updatePowerUpUI();
+                    renderBoard();
+                    updateDevInfo();
+                    updateStats();
                 } else {
-                    // Now on even turn - clear previews
-                    gameState.weedPreviews.clear();
+                    console.warn('Cannot reverse: no actions in history');
                 }
-
-                renderBoard();
-                updateDevInfo();
             }
         }
 
@@ -3347,6 +3504,36 @@
             gameState.weedPreviews.clear();
             renderBoard();
             updateDevInfo();
+        }
+
+        function devFillWeeds() {
+            // Calculate 60% of board tiles
+            const totalTiles = GRID_SIZE * GRID_SIZE;
+            const targetWeeds = Math.floor(totalTiles * 0.6);
+
+            // Get all tile positions
+            const allPositions = [];
+            for (let row = 0; row < GRID_SIZE; row++) {
+                for (let col = 0; col < GRID_SIZE; col++) {
+                    allPositions.push({ row, col });
+                }
+            }
+
+            // Shuffle positions randomly
+            for (let i = allPositions.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [allPositions[i], allPositions[j]] = [allPositions[j], allPositions[i]];
+            }
+
+            // Place weeds in first 60% of shuffled positions
+            for (let i = 0; i < targetWeeds; i++) {
+                const { row, col } = allPositions[i];
+                gameState.board[row][col] = 'weed';
+            }
+
+            renderBoard();
+            updateDevInfo();
+            console.log(`Filled board with ${targetWeeds} weeds (60% of ${totalTiles} tiles)`);
         }
 
         function devToggleClusterIDs() {
@@ -3549,6 +3736,47 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
         // ============================================
         // POWER-UPS
         // ============================================
+        async function animateCropDustFog(startRow) {
+            const board = document.getElementById('game-board');
+
+            // Animate fog from right to left with spreading wave pattern
+            for (let col = GRID_SIZE - 1; col >= 0; col--) {
+                // Calculate spread based on position from the right (every 4 columns, max spread of 1)
+                const distanceFromRight = GRID_SIZE - 1 - col;
+                const spread = Math.min(Math.floor(distanceFromRight / 4), 1);
+
+                // Create fog for all rows in the spread pattern
+                for (let rowOffset = -spread; rowOffset <= spread; rowOffset++) {
+                    const targetRow = startRow + rowOffset;
+
+                    // Skip if row is out of bounds
+                    if (targetRow < 0 || targetRow >= GRID_SIZE) continue;
+
+                    const tileElement = document.querySelector(`.tile[data-row="${targetRow}"][data-col="${col}"]`);
+                    if (tileElement) {
+                        const tileRect = tileElement.getBoundingClientRect();
+
+                        // Create fog element
+                        const fog = document.createElement('div');
+                        fog.className = 'crop-dust-fog';
+                        fog.style.left = (tileRect.left + window.scrollX) + 'px';
+                        fog.style.top = (tileRect.top + window.scrollY) + 'px';
+                        document.body.appendChild(fog);
+
+                        // Remove fog after animation completes
+                        setTimeout(() => fog.remove(), 600);
+                    }
+                }
+
+                // Small delay between each column for cascading effect (50ms)
+                await sleep(50);
+            }
+
+            // Wait a bit longer for the last fog to dissipate
+            await sleep(400);
+        }
+
+
         async function selectPowerUp(type) {
             // Check if we have this power-up
             if (gameState.powerUps[type] <= 0) return;
@@ -3556,6 +3784,10 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
             // Shuffle is immediate - no need to select a tile
             if (type === 'shuffle') {
                 if (gameState.isAnimating) return;
+
+                // Save state before shuffle for undo
+                saveStateSnapshot();
+
                 gameState.isAnimating = true;
                 gameState.powerUps.shuffle--;
                 updatePowerUpUI();
@@ -3569,6 +3801,12 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
                 gameState.activePowerUp = null;
                 const itemId = type === 'weedKiller' ? 'weedkiller' : (type === 'cropDust' ? 'cropdust' : type);
                 document.getElementById(`${itemId}-item`).classList.remove('active');
+
+                // Remove crop dust mode from board
+                if (type === 'cropDust') {
+                    document.getElementById('game-board').classList.remove('crop-dust-mode');
+                    clearTileHighlights();
+                }
             } else {
                 // Deselect other power-ups
                 document.querySelectorAll('.power-up-item').forEach(item => item.classList.remove('active'));
@@ -3576,21 +3814,29 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
                 gameState.activePowerUp = type;
                 const itemId = type === 'weedKiller' ? 'weedkiller' : (type === 'cropDust' ? 'cropdust' : type);
                 document.getElementById(`${itemId}-item`).classList.add('active');
+
+                // Add crop dust mode to board for plane cursor
+                if (type === 'cropDust') {
+                    document.getElementById('game-board').classList.add('crop-dust-mode');
+                }
             }
         }
 
         async function usePowerUp(row, col) {
+            // Save state before power-up for undo
+            saveStateSnapshot();
+
             const type = gameState.board[row][col];
             const powerUp = gameState.activePowerUp;
 
             if (powerUp === 'pickaxe') {
                 if (type === 'rock') {
-                    // Use pickaxe on rock
-                    gameState.board[row][col] = null;
+                    // Use pickaxe on rock - turns it into a diamond
+                    gameState.board[row][col] = 'diamond';
                     gameState.cleared.rocks++;
-                    gameState.treasures.coins += 1;
                     gameState.powerUps.pickaxe--;
 
+                    playSound('rockBreak');
                     updatePowerUpUI();
                     renderBoard();
 
@@ -3598,6 +3844,11 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
                     gameState.isAnimating = true;
                     await processCascade();
                     gameState.isAnimating = false;
+
+                    // Check for game over
+                    if (!hasValidMoves() && gameState.powerUps.shuffle === 0) {
+                        endGame('No more valid moves!');
+                    }
                 } else {
                     alert('Pickaxe can only destroy rocks!');
                     return;
@@ -3618,37 +3869,83 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
                     gameState.isAnimating = true;
                     await processCascade();
                     gameState.isAnimating = false;
+
+                    // Check for game over
+                    if (!hasValidMoves() && gameState.powerUps.shuffle === 0) {
+                        endGame('No more valid moves!');
+                    }
                 } else {
                     alert('Weed Killer can only kill weeds!');
                     return;
                 }
             } else if (powerUp === 'cropDust') {
-                // Clear all weeds in the selected row
+                // Calculate the spreading wave pattern (every 4 columns, max spread of 1)
+                const tilesToDust = [];
+                for (let col = 0; col < GRID_SIZE; col++) {
+                    const distanceFromRight = GRID_SIZE - 1 - col;
+                    const spread = Math.min(Math.floor(distanceFromRight / 4), 1);
+
+                    for (let rowOffset = -spread; rowOffset <= spread; rowOffset++) {
+                        const targetRow = row + rowOffset;
+                        if (targetRow >= 0 && targetRow < GRID_SIZE) {
+                            tilesToDust.push({ row: targetRow, col: col });
+                        }
+                    }
+                }
+
+                // Check if there are any weeds in the pattern
+                let hasWeeds = false;
+                for (let tile of tilesToDust) {
+                    if (gameState.board[tile.row][tile.col] === 'weed') {
+                        hasWeeds = true;
+                        break;
+                    }
+                }
+
+                if (!hasWeeds) {
+                    alert('No weeds in crop dust pattern!');
+                    return;
+                }
+
+                gameState.powerUps.cropDust--;
+                gameState.isAnimating = true;
+                updatePowerUpUI();
+
+                // Play plane sound effect
+                playSound('plane');
+
+                // Animate purple fog with spreading wave pattern
+                await animateCropDustFog(row);
+
+                // Now clear the weeds in the pattern
                 let weedsCleared = 0;
-                for (let c = 0; c < GRID_SIZE; c++) {
-                    if (gameState.board[row][c] === 'weed') {
-                        gameState.board[row][c] = null;
+                console.log('Clearing weeds in pattern:');
+                for (let tile of tilesToDust) {
+                    if (gameState.board[tile.row][tile.col] === 'weed') {
+                        console.log(`  Clearing weed at row ${tile.row}, col ${tile.col}`);
+                        gameState.board[tile.row][tile.col] = null;
                         gameState.cleared.weeds++;
                         gameState.resources.nutrient++;
                         weedsCleared++;
                     }
                 }
+                console.log(`Total weeds cleared: ${weedsCleared}`);
 
-                if (weedsCleared === 0) {
-                    alert('No weeds in this row!');
-                    return;
-                }
-
-                gameState.powerUps.cropDust--;
                 playSound('weed');
-
-                updatePowerUpUI();
                 renderBoard();
 
                 // Use cascade to handle gravity, refill, and match detection
-                gameState.isAnimating = true;
                 await processCascade();
                 gameState.isAnimating = false;
+
+                // Check for game over
+                if (!hasValidMoves() && gameState.powerUps.shuffle === 0) {
+                    endGame('No more valid moves!');
+                }
+
+                // Clean up crop dust mode
+                document.getElementById('game-board').classList.remove('crop-dust-mode');
+                clearTileHighlights();
             }
 
             // Deselect power-up
@@ -3774,6 +4071,7 @@ Selected: ${devState.selectedTile ? `[${devState.selectedTile[0]},${devState.sel
             <button class="dev-button" onclick="devSpawnWeed()">Spawn Weed at Selected</button>
             <button class="dev-button" onclick="devClearWeed()">Clear Weed at Selected</button>
             <button class="dev-button" onclick="devClearAllPreviews()">Clear All Previews</button>
+            <button class="dev-button" onclick="devFillWeeds()">Fill Board 60% Weeds</button>
         </div>
 
         <div class="dev-section">
